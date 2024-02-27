@@ -38,8 +38,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     const int tidx = threadIdx.x;
 
     constexpr int kBlockM = Kernel_traits::kBlockM;//128
-    constexpr int kBlockN = Kernel_traits::kBlockN;//64
-    constexpr int kHeadDim = Kernel_traits::kHeadDim;//64
+    constexpr int kBlockN = Kernel_traits::kBlockN;//128
+    constexpr int kHeadDim = Kernel_traits::kHeadDim;//32
     constexpr int kNWarps = Kernel_traits::kNWarps;//4
 
     auto seed_offset = at::cuda::philox::unpack(params.philox_args);
