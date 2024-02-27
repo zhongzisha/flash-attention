@@ -60,8 +60,6 @@ __forceinline__ __device__ uint32_t relu2<cutlass::bfloat16_t>(const uint32_t x)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-
 template<typename T>
 __forceinline__ __device__ uint32_t convert_relu2(const float2 x);
 
@@ -73,6 +71,8 @@ __forceinline__ __device__ uint32_t convert_relu2<cutlass::half_t>(const float2 
     asm volatile("cvt.rn.relu.f16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
     return res;
 }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 
 template<>
 __forceinline__ __device__ uint32_t convert_relu2<cutlass::bfloat16_t>(const float2 x) {
@@ -185,7 +185,13 @@ __forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tC
 // Convert acc_layout from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
 template<typename Layout>
 __forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
+#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
+#pragma message("sm80, convert_layout_acc_rowcol")
     static_assert(decltype(size<0>(acc_layout))::value == 4);
+#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
+#pragma message("sm70, convert_layout_acc_rowcol")
+    static_assert(decltype(size<0>(acc_layout))::value == 8);
+#endif
     static_assert(decltype(rank(acc_layout))::value == 3);
     auto l = logical_divide(acc_layout, Shape<_2>{});  // ((2, 2), MMA_M, MMA_N)
     return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<2>(l)));

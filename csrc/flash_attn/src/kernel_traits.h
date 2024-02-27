@@ -27,13 +27,23 @@ struct Flash_kernel_traits {
     using index_t = int64_t;
 
 #if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
+#pragma message("cuda arch >= 800")
     using MMA_Atom_Arch = std::conditional_t<
         std::is_same_v<elem_type, cutlass::half_t>,
         MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
         MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>
     >;
-#else
+// #else 
+//     using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
+#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 750
+#pragma message("cuda arch == 750")
     using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
+#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
+#pragma message("cuda arch == 700")
+    using MMA_Atom_Arch = MMA_Atom<SM70_8x8x4_F32F16F16F32_NT>;
+#else
+#pragma message("cuda arch < 700")
+    using MMA_Atom_Arch = MMA_Atom<SM61_DP4A>;
 #endif
 
 #if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 750
@@ -60,22 +70,24 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
 
     // The number of threads.
-    static constexpr int kNWarps = kNWarps_;
-    static constexpr int kNThreads = kNWarps * 32;
+    static constexpr int kNWarps = kNWarps_;   // 4
+    static constexpr int kNThreads = kNWarps * 32;  // 4*32 = 128
 
-    static constexpr int kBlockM = kBlockM_;
-    static constexpr int kBlockN = kBlockN_;
-    static constexpr int kHeadDim = kHeadDim_;
+    static constexpr int kBlockM = kBlockM_;  // 128
+    static constexpr int kBlockN = kBlockN_;  // 64
+    static constexpr int kHeadDim = kHeadDim_;  // 64
     static_assert(kHeadDim % 32 == 0);
-    static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
-    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
-    static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
+    static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;  // 64
+    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32); // 64
+    static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;  // 3
 
+    // 16x8x16, 4x1x1, 64x16x16
     using TiledMma = TiledMMA<
         typename Base::MMA_Atom_Arch,
         Layout<Shape<Int<kNWarps>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
         Tile<Int<16 * kNWarps>, _16, _16>>;
 
+    // <3x3x3> <8,64> <64,1>
     using SmemLayoutAtomQ = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
                     // This has to be kBlockKSmem, using kHeadDim gives wrong results for d=128
