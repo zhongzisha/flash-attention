@@ -119,6 +119,8 @@ GCC_VERSION=9.2.0
 
 
 # debug
+GCC_VERSION=9.2.0
+
 /usr/local/CUDA/12.1.0/bin/nvcc  \
 -I/spin1/home/linux/zhongz2/flash-attention/csrc/flash_attn \
 -I/spin1/home/linux/zhongz2/flash-attention/csrc/flash_attn/src \
@@ -130,7 +132,29 @@ GCC_VERSION=9.2.0
 -I/usr/local/CUDA/12.1.0/include \
 -I/usr/local/cuDNN/8.9.2/CUDA-12/include \
 -I/data/zhongz2/anaconda3/envs/th21_ds/include/python3.11 \
--o test.exe \
+-D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ \
+--expt-relaxed-constexpr --compiler-options -fPIC -O3 -std=c++17 -U__CUDA_NO_HALF_OPERATORS__ -U__CUDA_NO_HALF_CONVERSIONS__ \
+-U__CUDA_NO_HALF2_OPERATORS__ -U__CUDA_NO_BFLOAT16_CONVERSIONS__ --expt-relaxed-constexpr --expt-extended-lambda \
+--use_fast_math -gencode arch=compute_70,code=sm_70 \
+-o test_sm70.exe \
+test1.cu
+
+/usr/local/CUDA/12.1.0/bin/nvcc  \
+-I/spin1/home/linux/zhongz2/flash-attention/csrc/flash_attn \
+-I/spin1/home/linux/zhongz2/flash-attention/csrc/flash_attn/src \
+-I/spin1/home/linux/zhongz2/flash-attention/csrc/cutlass/include \
+-I/data/zhongz2/anaconda3/envs/th21_ds/lib/python3.11/site-packages/torch/include \
+-I/data/zhongz2/anaconda3/envs/th21_ds/lib/python3.11/site-packages/torch/include/torch/csrc/api/include \
+-I/data/zhongz2/anaconda3/envs/th21_ds/lib/python3.11/site-packages/torch/include/TH \
+-I/data/zhongz2/anaconda3/envs/th21_ds/lib/python3.11/site-packages/torch/include/THC \
+-I/usr/local/CUDA/12.1.0/include \
+-I/usr/local/cuDNN/8.9.2/CUDA-12/include \
+-I/data/zhongz2/anaconda3/envs/th21_ds/include/python3.11 \
+-D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ \
+--expt-relaxed-constexpr --compiler-options -fPIC -O3 -std=c++17 -U__CUDA_NO_HALF_OPERATORS__ -U__CUDA_NO_HALF_CONVERSIONS__ \
+-U__CUDA_NO_HALF2_OPERATORS__ -U__CUDA_NO_BFLOAT16_CONVERSIONS__ --expt-relaxed-constexpr --expt-extended-lambda \
+--use_fast_math -gencode arch=compute_80,code=sm_80 -DUSE_SM800 \
+-o test_sm80.exe \
 test1.cu
 
 # sm80 fwd hdim=64

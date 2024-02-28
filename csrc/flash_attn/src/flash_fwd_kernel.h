@@ -118,15 +118,39 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     const index_t row_offset_p = ((bidb * params.h + bidh) * params.seqlen_q_rounded
         + m_block * kBlockM) * params.seqlen_k_rounded + (n_block_max - 1) * kBlockN;
 
-    // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-    //     printf("m_block = %d, n_block_min = %d, n_block_max = %d\n", m_block, n_block_min, n_block_max);
-    //     printf("bidb = %d, bidh = %d\n", bidb, bidh);
-    //     printf("kBlockM = %d, kBlockN = %d, kHeadDim = %d, kNWarps = %d\n", kBlockM, kBlockN, kHeadDim, kNWarps);
-    //     printf("q: %ld, %ld, %ld\n", params.q_batch_stride, params.q_row_stride, params.q_head_stride);
-    //     printf("k: %ld, %ld, %ld\n", params.k_batch_stride, params.k_row_stride, params.k_head_stride);
-    //     printf("v: %ld, %ld, %ld\n", params.v_batch_stride, params.v_row_stride, params.v_head_stride);
-    //     printf("p: %d, %d, %d\n", params.h, params.seqlen_q_rounded, params.seqlen_k_rounded);
-    // }
+
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        // m_block = [0-7], n_block_min = 0, n_block_max = 16
+        printf("m_block = %d, n_block_min = %d, n_block_max = %d\n", m_block, n_block_min, n_block_max);
+        // 0, 0
+        printf("bidb = %d, bidh = %d\n", bidb, bidh);
+        // kBlockM = 128, kBlockN = 64, kHeadDim = 128, kNWarps = 4
+        printf("kBlockM = %d, kBlockN = %d, kHeadDim = %d, kNWarps = %d\n", kBlockM, kBlockN, kHeadDim, kNWarps);
+        //q: 4194304, 4096, 128
+        printf("q: %ld, %ld, %ld\n", params.q_batch_stride, params.q_row_stride, params.q_head_stride);
+        //k: 4194304, 4096, 128
+        printf("k: %ld, %ld, %ld\n", params.k_batch_stride, params.k_row_stride, params.k_head_stride);
+        //v: 4194304, 4096, 128
+        printf("v: %ld, %ld, %ld\n", params.v_batch_stride, params.v_row_stride, params.v_head_stride);
+        //p: 32, 1024, 1024
+        printf("p: %d, %d, %d\n", params.h, params.seqlen_q_rounded, params.seqlen_k_rounded);
+    }
+    /*
+    q_batch_stride=4194304              
+    k_batch_stride=4194304                                                                                    
+    v_batch_stride=4194304           
+    q_row_stride=4096                   
+    k_row_stride=4096                   
+    v_row_stride=4096                                                                                         
+    q_head_stride=128                
+    k_head_stride=128                   
+    v_head_stride=128                   
+    dropout=false, sm8x=false, causal=0                                                                       
+    smem_size = 65536                   
+    num_m_block=8, b=8, h=32, is_even_MN=1, is_even_K=1, return_softmax=0
+    kBlockM=128, kBlockN=64, kHeadDim=128, kNWarps=4, kBlockKSmem=64, kBlockKGmem=128, kSwizzle=3
+    kSmemQSize=32768, kSmemKVSize=32768, kSmemSize=65536, kGmemElemsPerLoad=8, kGmemThreadsPerRow=8
+    */
 
     Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
@@ -149,11 +173,13 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
     Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
     Tensor sVtNoSwizzle = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
-    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        //print(gQ.layout()); printf("\n");  //(_128,_128):(4096,_1)
-        print(sQ.layout()); printf("\n");  // 
-        //print(sVtNoSwizzle.layout()); printf("\n");  // 
-    }
+    // if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    //     //print(gQ.layout()); printf("\n");  //(_128,_128):(4096,_1)
+    //     //print(sQ.layout()); printf("\n");  // Sw<3,3,3> o _0 o (_128,(_64,_2)):(_64,(_1,_8192))
+    //     //print(sVtNoSwizzle.layout()); printf("\n");  // ((_64,_2),_64):((_1,_4096),_64)
+    //     //print(sVt.layout()); printf("\n");  //Sw<3,3,3> o _0 o ((_64,_2),_64):((_1,_4096),_64)
+    //     //print(sVtNoSwizzle.layout()); printf("\n");  //((_64,_2),_64):((_1,_4096),_64)
+    // }
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
 
@@ -163,6 +189,14 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
     Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
     Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
+    // if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    //     // print(tQgQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+    //     // print(tQsQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+    //     // print(tKgK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+    //     // print(tKsK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+    //     // print(tVgV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+    //     // print(tVsV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192) 
+    // }
 
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
@@ -176,6 +210,29 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
     //     if (cute::thread0()) { print(acc_o); }
     // }
+
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        print(gQ.layout()); printf("\n");  //(_128,_128):(4096,_1)
+        print(sQ.layout()); printf("\n");  // Sw<3,3,3> o _0 o (_128,(_64,_2)):(_64,(_1,_8192))
+        print(sVtNoSwizzle.layout()); printf("\n");  // ((_64,_2),_64):((_1,_4096),_64)
+        print(sVt.layout()); printf("\n");  //Sw<3,3,3> o _0 o ((_64,_2),_64):((_1,_4096),_64)
+        print(sVtNoSwizzle.layout()); printf("\n");  //((_64,_2),_64):((_1,_4096),_64)
+
+        print(tQgQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tQsQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tKgK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tKsK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tVgV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tVsV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+
+        print(tSrQ.layout()); printf("\n"); //((_2,_2,_2),_2,((_2,_2),_2)):((_1,_2,_4),_8,((_16,_32),_64))
+        print(tSrK.layout()); printf("\n"); //((_2,_2),_8,((_2,_2),_2)):((_1,_2),_4,((_32,_64),_128))
+        print(tOrVt.layout()); printf("\n"); //((_2,_2),(_8,_2),_4):((_1,_2),(_4,_128),_32)
+        print(tSgS.layout()); printf("\n"); //((_2,_2),_2,_8):((_1,8192),65536,_8)
+        print(acc_o.layout()); printf("\n"); //((_2,_2),_2,_16):((_1,_2),_4,_8)
+    }
+    */
 
     //
     // Copy Atom retiling
@@ -194,6 +251,34 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     auto smem_tiled_copy_V = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma);
     auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
     Tensor tOsVt = smem_thr_copy_V.partition_S(sVt);
+
+
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        print(gQ.layout()); printf("\n");  //(_128,_128):(4096,_1)
+        print(sQ.layout()); printf("\n");  // Sw<3,3,3> o _0 o (_128,(_64,_2)):(_64,(_1,_8192))
+        print(sVtNoSwizzle.layout()); printf("\n");  // ((_64,_2),_64):((_1,_4096),_64)
+        print(sVt.layout()); printf("\n");  //Sw<3,3,3> o _0 o ((_64,_2),_64):((_1,_4096),_64)
+        print(sVtNoSwizzle.layout()); printf("\n");  //((_64,_2),_64):((_1,_4096),_64)
+        print(tQgQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tQsQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tKgK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tKsK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tVgV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tVsV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+
+        print(tQgQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tQsQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tKgK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tKsK.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+        print(tVgV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),65536,_64)
+        print(tVsV.layout()); printf("\n"); //((_8,_1),_8,_2):((_1,_0),_1024,_8192)
+
+        print(tSsQ.layout()); printf("\n"); //((_8,_1),_2,((_2,_2),_2)):((_1,_0),_4096,((16,32),_8192))
+        print(tSsK.layout()); printf("\n"); //((_8,_1),_4,((_2,_2),_2)):((_1,_0),_1024,((16,32),_4096))
+        print(tOsVt.layout()); printf("\n"); //((_8,_1),((_2,_2),_2),_4):((_1,_0),((16,32),_4096),_1024)
+    }
+    */
 
     //
     // PREDICATES
@@ -227,6 +312,17 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
     Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
 
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        print(cQ.layout()); printf("\n"); //(_128,_128):(_1@0,_1@1)
+        print(cKV.layout()); printf("\n"); //(_64,_128):(_1@0,_1@1)
+        print(tQcQ.layout()); printf("\n"); //((_8,_1),_8,_2):((_1@1,_0),_16@0,_64@1)
+        print(tKVcKV.layout()); printf("\n"); //((_8,_1),_4,_2):((_1@1,_0),_16@0,_64@1)
+        print(tQpQ.layout()); printf("\n"); //(_2):(_1)
+        print(tKVpKV.layout()); printf("\n"); //(_2):(_1)
+    }
+    */
+
     // Set predicates for k bounds
     if (!Is_even_K) {
         #pragma unroll
@@ -242,9 +338,9 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                                        binfo.actual_seqlen_q - m_block * kBlockM);
     if (Kernel_traits::Is_Q_in_regs) { cute::cp_async_fence(); }
 
-    // // if (cute::thread(1, 0)) { print(tQsQ); }
-    // // Tensor sQNoSwizzle = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQNoSwizzle{});
-    // // if (cute::thread0()) { print(sQNoSwizzle); }
+    // if (cute::thread(1, 0)) { print(tQsQ); }
+    // Tensor sQNoSwizzle = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQNoSwizzle{});
+    // if (cute::thread0()) { print(sQNoSwizzle); }
 
     if (Kernel_traits::Share_Q_K_smem) {
         flash::cp_async_wait<0>();
@@ -291,7 +387,12 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
     #pragma unroll
     for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
-        Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
+        Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N) 4, 16x8x16,4x1x1,16*4x16x16
+
+        // if (masking_step==0 && m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        //     print(acc_s.layout()); printf("\n"); //((_2,_2),_2,_8):((_1,_2),_4,_8)
+        // }
+
         clear(acc_s);
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -433,6 +534,16 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor taccOrO = smem_thr_copy_O.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
     Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        print(lse.layout()); printf("\n"); //(_4):(_1)
+        print(rO.layout()); printf("\n"); //((_2,_2),_2,_16):((_1,_2),_4,_8)
+        print(sO.layout()); printf("\n"); //Sw<3,3,3> o _0 o (_128,(_64,_2)):(_64,(_1,_8192))
+        print(taccOrO.layout()); printf("\n"); //((_1,(_4,_2)),_2,_8):((_0,(_1,_8)),_4,_16)
+        print(taccOsO.layout()); printf("\n"); //((_1,(_2,_2,_2)),_2,((_2,_2),_2)):((_0,(_1,_512,8)),_4096,((16,32),_8192))
+    }
+    */
+
     // sO has the same size as sQ, so we don't need to sync here.
     if (Kernel_traits::Share_Q_K_smem) { __syncthreads(); }
 
@@ -451,6 +562,15 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
     Tensor tOsO = gmem_thr_copy_O.partition_S(sO);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
     Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        print(gO.layout()); printf("\n"); // (_128,_128):(4096,_1)
+        print(gLSE.layout()); printf("\n"); // (_128):(_1)
+        print(tOsO.layout()); printf("\n"); // ((_1,_8),_8,_2):((_0,_1),_1024,_8192)
+        print(tOgO.layout()); printf("\n"); // ((_1,_8),_8,_2):((_0,_1),65536,_64)
+    }
+    */
 
     __syncthreads();
 
@@ -471,6 +591,15 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         }
     }
 
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        print(tOrO.layout()); printf("\n"); // ((_1,_8),_8,_2):((_0,_1),_8,_64)
+        print(caccO.layout()); printf("\n"); // (_128,_128):(_1@0,_1@1)
+        print(taccOcO.layout()); printf("\n"); // ((_2,_2),_2,_16):((_1@1,_8@0),_64@0,_8@1)
+        print(taccOcO_row.layout()); printf("\n"); // (_2,_2):(_8@0,_64@0)
+    }
+    */
+
     // Construct identity layout for sO
     Tensor cO = make_identity_tensor(make_shape(size<0>(sO), size<1>(sO)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     // Repeat the partitioning with identity layouts
@@ -484,6 +613,14 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
         gmem_tiled_copy_O, tOrO, tOgO, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
     );
+
+    /*
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { 
+        print(cO.layout()); printf("\n"); // (_128,_128):(_1@0,_1@1)
+        print(tOcO.layout()); printf("\n"); // ((_1,_8),_8,_2):((_0,_1@1),_16@0,_64@1)
+        print(tOpO.layout()); printf("\n"); //(_2):(_1)
+    }
+    */
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

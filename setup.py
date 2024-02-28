@@ -115,10 +115,10 @@ if not SKIP_CUDA_BUILD:
                 "FlashAttention is only supported on CUDA 11.6 and above.  "
                 "Note: make sure nvcc has a supported version by running nvcc -V."
             )
-    # cc_flag.append("-gencode")
-    # cc_flag.append("arch=compute_70,code=sm_70")
     cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_80,code=sm_80")
+    cc_flag.append("arch=compute_70,code=sm_70")
+    # cc_flag.append("-gencode")
+    # cc_flag.append("arch=compute_80,code=sm_80")
     # if CUDA_HOME is not None:
     #     if bare_metal_version >= Version("11.8"):
     #         cc_flag.append("-gencode")
@@ -134,12 +134,15 @@ if not SKIP_CUDA_BUILD:
             name="flash_attn_2_cuda",
             sources=[
                 "csrc/flash_attn/flash_api.cpp",
-                "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
-                "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu",
+                # "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+                # "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
+                # "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
+                # "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
+                # "csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm80.cu",
+                # "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm70.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm70.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_sm70.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", "-fPIC"] + generator_flag,
