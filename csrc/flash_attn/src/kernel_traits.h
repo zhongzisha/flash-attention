@@ -27,23 +27,15 @@ struct Flash_kernel_traits {
     using index_t = int64_t;
 
 #if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
-#pragma message("cuda arch >= 800")
     using MMA_Atom_Arch = std::conditional_t<
         std::is_same_v<elem_type, cutlass::half_t>,
         MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
         MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>
     >;
-// #else 
-//     using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
 #elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 750
-#pragma message("cuda arch == 750")
     using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
-#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
-#pragma message("cuda arch == 700")
-    using MMA_Atom_Arch = MMA_Atom<SM70_8x8x4_F32F16F16F32_NT>;
 #else
-#pragma message("cuda arch < 700")
-    using MMA_Atom_Arch = MMA_Atom<SM61_DP4A>;
+    using MMA_Atom_Arch = MMA_Atom<SM70_8x8x4_F32F16F16F32_TN>;
 #endif
 
 #if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 750
@@ -54,6 +46,59 @@ struct Flash_kernel_traits {
     using SmemCopyAtomTransposed = Copy_Atom<DefaultCopy, elem_type>;
 #endif
 };
+
+/*
+// Logical thread id to thread idx (quadpair)
+using SM70_QuadPair = Layout<Shape <_4, _2>,
+                             Stride<_1,_16>>;
+// (T8,V4) -> (M8,K4)
+using SM70_8x4_Row  = Layout<Shape <_8,_4>,
+                             Stride<_1,_8>>;
+// (T8,V4) -> (M8,K4)
+using SM70_8x4_Col  = Layout<Shape <Shape <_4,_2>,_4>,
+                             Stride<Stride<_8,_4>,_1>>;
+// (T8,V8) -> (M8,N8)
+using SM70_8x8_16b  = Layout<Shape <_8,_8>,
+                             Stride<_1,_8>>;
+// (T8,V8) -> (M8,N8)
+using SM70_8x8_32b  = Layout<Shape <Shape <_2, _2,_2>,Shape <_2,_2, _2>>,
+                             Stride<Stride<_1,_16,_4>,Stride<_8,_2,_32>>>;
+
+struct MMA_Traits<SM70_8x8x4_F32F16F16F32_TN>
+{
+  using ValTypeD = float;
+  using ValTypeA = half_t;
+  using ValTypeB = half_t;
+  using ValTypeC = float;
+
+  using Shape_MNK = Shape<_8,_8,_4>;
+  using ThrID   = Layout<Shape <_4, _2>,
+                         Stride<_1,_16>>;
+  using ALayout = Layout<Shape <_8,_4>,
+                         Stride<_1,_8>>;
+  using BLayout = Layout<Shape <_8,_4>,
+                         Stride<_1,_8>>;
+  using CLayout = Layout<Shape <Shape <_2, _2,_2>,Shape <_2,_2, _2>>,
+                         Stride<Stride<_1,_16,_4>,Stride<_8,_2,_32>>>;
+};
+
+struct MMA_Traits<SM80_16x8x16_F32F16F16F32_TN>
+{
+  using ValTypeD = float;
+  using ValTypeA = half_t;
+  using ValTypeB = half_t;
+  using ValTypeC = float;
+
+  using Shape_MNK = Shape<_16,_8,_16>;
+  using ThrID   = Layout<_32>;
+  using ALayout = Layout<Shape <Shape < _4,_8>,Shape < _2,_2,  _2>>,
+                         Stride<Stride<_32,_1>,Stride<_16,_8,_128>>>;
+  using BLayout = Layout<Shape <Shape < _4,_8>,Shape <_2, _2>>,
+                         Stride<Stride<_16,_1>,Stride<_8,_64>>>;
+  using CLayout = Layout<Shape <Shape < _4,_8>,Shape < _2,_2>>,
+                         Stride<Stride<_32,_1>,Stride<_16,_8>>>;
+};
+*/
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
@@ -70,24 +115,22 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
 
     // The number of threads.
-    static constexpr int kNWarps = kNWarps_;   // 4
-    static constexpr int kNThreads = kNWarps * 32;  // 4*32 = 128
+    static constexpr int kNWarps = kNWarps_;
+    static constexpr int kNThreads = kNWarps * 32;
 
-    static constexpr int kBlockM = kBlockM_;  // 128
-    static constexpr int kBlockN = kBlockN_;  // 64
-    static constexpr int kHeadDim = kHeadDim_;  // 64
+    static constexpr int kBlockM = kBlockM_;
+    static constexpr int kBlockN = kBlockN_;
+    static constexpr int kHeadDim = kHeadDim_;
     static_assert(kHeadDim % 32 == 0);
-    static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;  // 64
-    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32); // 64
-    static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;  // 3
+    static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
+    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
+    static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
 
-    // 16x8x16, 4x1x1, 64x16x16
     using TiledMma = TiledMMA<
         typename Base::MMA_Atom_Arch,
         Layout<Shape<Int<kNWarps>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
         Tile<Int<16 * kNWarps>, _16, _16>>;
 
-    // <3x3x3> <8,64> <64,1>
     using SmemLayoutAtomQ = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
                     // This has to be kBlockKSmem, using kHeadDim gives wrong results for d=128

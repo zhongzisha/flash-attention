@@ -463,6 +463,7 @@ inline __device__ void compute_attn_1rowblock(float* Q, float* K, float* V, floa
     // params.o_ptr = out.data_ptr();
     int o_row_stride = 1;
     int o_head_stride = 64;
+    int h_h_k_ratio = 1;
 
         int q_batch_stride = 2097152;
         int k_batch_stride = 2097152;
@@ -473,27 +474,117 @@ inline __device__ void compute_attn_1rowblock(float* Q, float* K, float* V, floa
     const BlockInfo</*Varlen=*/false> binfo(bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
-        const index_t row_offset_o = binfo.q_offset(o_batch_stride, o_row_stride, bidb)
-            + m_block * kBlockM * o_row_stride + bidh * o_head_stride;
-        const index_t row_offset_lse = (bidb * kHeadDim + bidh) * seqlen_q + m_block * kBlockM;
-        Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(O) + row_offset_o),
-                                Shape<Int<kBlockM>, Int<kHeadDim>>{},
-                                make_stride(o_row_stride, _1{}));
 
-        typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
-        auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
-        Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
-        Tensor tOrO = make_tensor<Element>(shape(tOgO));
-        clear(tOrO);
-        // Construct identity layout for sO
-        Tensor cO = make_identity_tensor(make_shape(size<0>(gO), size<1>(gO)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-        // Repeat the partitioning with identity layouts
-        Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
-        Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));
+    const index_t row_offset_q = binfo.q_offset(q_batch_stride, q_row_stride, bidb)
+        + m_block * kBlockM * q_row_stride + bidh * q_head_stride;
+    // We move K and V to the last block.
+    const index_t row_offset_k = binfo.k_offset(k_batch_stride, k_row_stride, bidb)
+        + (n_block_max - 1) * kBlockN * k_row_stride + (bidh / h_h_k_ratio) * k_head_stride;
+    const index_t row_offset_v = binfo.k_offset(v_batch_stride, v_row_stride, bidb)
+        + (n_block_max - 1) * kBlockN * v_row_stride + (bidh / h_h_k_ratio) * v_head_stride;
+    const index_t row_offset_p = ((bidb *  + bidh) * seqlen_q_rounded
+        + m_block * kBlockM) * params.seqlen_k_rounded + (n_block_max - 1) * kBlockN;
 
-        typename Kernel_traits::TiledMma tiled_mma;
-        auto thr_mma = tiled_mma.get_thread_slice(tidx);
-        Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_M, MMA_K
+    Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
+                            Shape<Int<kBlockM>, Int<kHeadDim>>{},
+                            make_stride(params.q_row_stride, _1{}));
+    Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
+                            Shape<Int<kBlockN>, Int<kHeadDim>>{},
+                            make_stride(params.k_row_stride, _1{}));
+    Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.v_ptr) + row_offset_v),
+                            Shape<Int<kBlockN>, Int<kHeadDim>>{},
+                            make_stride(params.v_row_stride, _1{}));
+    Tensor gP = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.p_ptr) + row_offset_p),
+                            Shape<Int<kBlockM>, Int<kBlockN>>{},
+                            make_stride(params.seqlen_k_rounded, _1{}));
+
+    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
+                            typename Kernel_traits::SmemLayoutQ{});
+    // Careful we're using the same smem for sQ and sK | sV if Share_Q_K_smem;
+    Tensor sK = make_tensor(sQ.data() + (Kernel_traits::Share_Q_K_smem ? 0 : size(sQ)),
+                            typename Kernel_traits::SmemLayoutKV{});
+    Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
+    Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
+    Tensor sVtNoSwizzle = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
+
+    typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
+    auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
+
+    Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
+    Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
+    Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
+    Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
+    Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
+    Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
+
+    typename Kernel_traits::TiledMma tiled_mma;
+    auto thr_mma = tiled_mma.get_thread_slice(tidx);
+    Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
+    Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
+    Tensor tOrVt  = thr_mma.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
+
+    Tensor tSgS  = thr_mma.partition_C(gP);
+
+    Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_M, MMA_K
+
+    //
+    // Copy Atom retiling
+    //
+
+    auto smem_tiled_copy_Q = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
+    auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(tidx);
+    // if (cute::thread0()) {smem_thr_copy_Q.print_all();}
+    Tensor tSsQ = smem_thr_copy_Q.partition_S(sQ);
+    // if (cute::thread0()) {print(tSsQ.layout()); printf("\n");}
+
+    auto smem_tiled_copy_K = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
+    auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(tidx);
+    Tensor tSsK = smem_thr_copy_K.partition_S(sK);
+
+    auto smem_tiled_copy_V = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma);
+    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
+    Tensor tOsVt = smem_thr_copy_V.partition_S(sVt);
+
+    //
+    // PREDICATES
+    //
+
+    // // Allocate predicate tensors for m and n
+    // Tensor tQpQ = make_tensor<bool>(make_shape(size<1>(tQsQ), size<2>(tQsQ)), Stride<_1,_0>{});
+    // Tensor tKVpKV = make_tensor<bool>(make_shape(size<1>(tKsK), size<2>(tKsK)), Stride<_1,_0>{});
+
+    // Construct identity layout for sQ and sK
+    Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
+    Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
+    // Tensor tScQ = thr_mma.partition_A(cQ);                           // (MMA,MMA_M,MMA_K)
+    // if (cute::thread0()) {
+    //     print(tScQ.layout()); printf("\n");
+    //     for (int i = 0; i < size(tScQ); ++i) {
+    //         printf("%d ", get<0>(tScQ(i)));
+    //     }
+    //     printf("\n");
+    //     for (int i = 0; i < size(tScQ); ++i) {
+    //         printf("%d ", get<1>(tScQ(i)));
+    //     }
+    //     printf("\n");
+    // }
+
+    // Repeat the partitioning with identity layouts
+    Tensor tQcQ = gmem_thr_copy_QKV.partition_S(cQ);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
+    Tensor tKVcKV = gmem_thr_copy_QKV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
+
+    // Allocate predicate tensors for k
+    Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
+    Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
+
+    // Set predicates for k bounds
+    if (!Is_even_K) {
+        #pragma unroll
+        for (int k = 0; k < size(tQpQ); ++k) { tQpQ(k) = get<1>(tQcQ(0, 0, k)) < params.d; }
+        #pragma unroll
+        for (int k = 0; k < size(tKVpKV); ++k) { tKVpKV(k) = get<1>(tKVcKV(0, 0, k)) < params.d; }
+    }
+
 
 }
 

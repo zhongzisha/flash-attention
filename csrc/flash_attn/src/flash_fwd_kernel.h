@@ -37,10 +37,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     // The thread index.
     const int tidx = threadIdx.x;
 
-    constexpr int kBlockM = Kernel_traits::kBlockM;//128
-    constexpr int kBlockN = Kernel_traits::kBlockN;//128
-    constexpr int kHeadDim = Kernel_traits::kHeadDim;//32
-    constexpr int kNWarps = Kernel_traits::kNWarps;//4
+    constexpr int kBlockM = Kernel_traits::kBlockM;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+    constexpr int kHeadDim = Kernel_traits::kHeadDim;
+    constexpr int kNWarps = Kernel_traits::kNWarps;
 
     auto seed_offset = at::cuda::philox::unpack(params.philox_args);
     flash::Dropout dropout(std::get<0>(seed_offset), std::get<1>(seed_offset), params.p_dropout_in_uint8_t,
@@ -118,6 +118,16 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     const index_t row_offset_p = ((bidb * params.h + bidh) * params.seqlen_q_rounded
         + m_block * kBlockM) * params.seqlen_k_rounded + (n_block_max - 1) * kBlockN;
 
+    // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    //     printf("m_block = %d, n_block_min = %d, n_block_max = %d\n", m_block, n_block_min, n_block_max);
+    //     printf("bidb = %d, bidh = %d\n", bidb, bidh);
+    //     printf("kBlockM = %d, kBlockN = %d, kHeadDim = %d, kNWarps = %d\n", kBlockM, kBlockN, kHeadDim, kNWarps);
+    //     printf("q: %ld, %ld, %ld\n", params.q_batch_stride, params.q_row_stride, params.q_head_stride);
+    //     printf("k: %ld, %ld, %ld\n", params.k_batch_stride, params.k_row_stride, params.k_head_stride);
+    //     printf("v: %ld, %ld, %ld\n", params.v_batch_stride, params.v_row_stride, params.v_head_stride);
+    //     printf("p: %d, %d, %d\n", params.h, params.seqlen_q_rounded, params.seqlen_k_rounded);
+    // }
+
     Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
                             make_stride(params.q_row_stride, _1{}));
@@ -139,7 +149,11 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
     Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
     Tensor sVtNoSwizzle = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
-
+    if (m_block == 0 && threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        //print(gQ.layout()); printf("\n");  //(_128,_128):(4096,_1)
+        print(sQ.layout()); printf("\n");  // 
+        //print(sVtNoSwizzle.layout()); printf("\n");  // 
+    }
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
 
@@ -159,6 +173,9 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor tSgS  = thr_mma.partition_C(gP);
 
     Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_M, MMA_K
+    // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    //     if (cute::thread0()) { print(acc_o); }
+    // }
 
     //
     // Copy Atom retiling
@@ -297,11 +314,9 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         );
         // if (cute::thread0()) { print(acc_s); }
 
-        #pragma message("apply mask1 begin")
         mask.template apply_mask<Is_causal, Is_even_MN>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        #pragma message("apply mask1 end")
 
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -377,11 +392,9 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
             cute::cp_async_fence();
         }
 
-        #pragma message("apply mask2 begin")
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        #pragma message("apply mask2 end")
 
         softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
 
@@ -446,9 +459,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor taccOcO = thr_mma.partition_C(caccO);                           // (MMA,MMA_M,MMA_K)
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
     static_assert(decltype(size<0>(taccOcO))::value == 4);
-#endif
     // Convert to ((2, 2), MMA_M, MMA_K) then take only the row indices.
     Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M
@@ -862,11 +873,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         );
         // if (cute::thread0()) { print(acc_s); }
 
-        #pragma message("apply mask3 begin")
         mask.template apply_mask<Is_causal, Is_even_MN>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        #pragma message("apply mask3 end")
 
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -954,12 +963,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             cute::cp_async_fence();
         }
 
-        #pragma message("apply mask4 begin")
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        #pragma message("apply mask4 end")
-
         softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
 
         Tensor rP = flash::convert_type<Element>(acc_s);
@@ -1019,9 +1025,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor taccOcO = thr_mma.partition_C(caccO);                           // (MMA,MMA_M,MMA_K)
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
     static_assert(decltype(size<0>(taccOcO))::value == 4);
-#endif
     // Convert to ((2, 2), MMA_M, MMA_K) then take only the row indices.
     Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M

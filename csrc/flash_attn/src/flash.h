@@ -138,6 +138,19 @@ struct Flash_fwd_params : public Qkv_params {
 
     void * __restrict__ alibi_slopes_ptr;
     index_t alibi_slopes_batch_stride;
+
+public:
+    virtual void print() {
+        printf("q_batch_stride=%ld\n", q_batch_stride);
+        printf("k_batch_stride=%ld\n", k_batch_stride);
+        printf("v_batch_stride=%ld\n", v_batch_stride);
+        printf("q_row_stride=%ld\n", q_row_stride);
+        printf("k_row_stride=%ld\n", k_row_stride);
+        printf("v_row_stride=%ld\n", v_row_stride);
+        printf("q_head_stride=%ld\n", q_head_stride);
+        printf("k_head_stride=%ld\n", k_head_stride);
+        printf("v_head_stride=%ld\n", v_head_stride);
+    };
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

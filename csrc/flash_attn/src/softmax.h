@@ -23,13 +23,7 @@ template<bool zero_init=true, typename Engine0, typename Layout0, typename Engin
 __device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const &tensor, Tensor<Engine1, Layout1> &summary, Operator &op) {
     static_assert(Layout0::rank == 2, "Only support 2D Tensor");
     static_assert(Layout1::rank == 1, "Only support 1D Tensor");
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
-#pragma message("sm80, thread_reduce_")
-    CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor)); //sm80, 16x8x16
-#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
-#pragma message("sm70, thread_reduce_")
-    CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor));  //sm70, 8x8x4
-#endif
+    CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor));
     #pragma unroll
     for (int mi = 0; mi < size<0>(tensor); mi++) {
         summary(mi) = zero_init ? tensor(mi, 0) : op(summary(mi), tensor(mi, 0));
@@ -135,13 +129,7 @@ struct Softmax {
     __forceinline__ __device__ void softmax_rescale_o(Tensor0 &acc_s, Tensor1 &acc_o, float softmax_scale_log2) {
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
-#pragma message("sm80, softmax_rescale_o")
-    static_assert(decltype(size<0>(scores))::value == kNRows); //sm80, 16x8x16
-#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
-#pragma message("sm70, softmax_rescale_o")
-    static_assert(decltype(size<0>(scores))::value == kNRows*2);  //sm70, 8x8x4
-#endif
+        static_assert(decltype(size<0>(scores))::value == kNRows);
         if (Is_first) {
             flash::template reduce_max</*zero_init=*/true>(scores, row_max);
             flash::scale_apply_exp2(scores, row_max, softmax_scale_log2);

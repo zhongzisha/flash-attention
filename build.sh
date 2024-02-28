@@ -131,7 +131,7 @@ GCC_VERSION=9.2.0
 -I/usr/local/cuDNN/8.9.2/CUDA-12/include \
 -I/data/zhongz2/anaconda3/envs/th21_ds/include/python3.11 \
 -o test.exe \
-test.cu
+test1.cu
 
 # sm80 fwd hdim=64
 /usr/local/CUDA/12.1.0/bin/nvcc  \

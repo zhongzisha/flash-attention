@@ -132,15 +132,7 @@ struct Mask {
                                                const int warp_row_stride) {
         static_assert(!(Causal_mask && Is_local), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
-        // static_assert(decltype(size<0>(tensor_))::value == 1, "First dimension must be 1");
-        // static_assert(decltype(size<0>(tensor_))::value == 2, "First dimension must be 2");
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
-#pragma message("sm80, apply_mask")
-    static_assert(decltype(size<0>(tensor_))::value == 4, "First dimension must be 4"); //sm80, 16x8x16
-#elif defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ == 700
-#pragma message("sm70, apply_mask")
-    static_assert(decltype(size<0>(tensor_))::value == 8, "First dimension must be 8");  //sm70, 8x8x4
-#endif
+        static_assert(decltype(size<0>(tensor_))::value == 4, "First dimension must be 4");
         static constexpr bool Need_masking = Has_alibi || Causal_mask || Is_local || !Is_even_MN;
         // if (cute::thread0()) { printf("Has_alibi = %d, Causal_mask=%d, Is_local=%d, Is_even_MN = %d, Need_masking = %d\n", Has_alibi, Causal_mask, Is_local, Is_even_MN, Need_masking); }
         if constexpr (Need_masking) {
