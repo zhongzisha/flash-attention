@@ -3,9 +3,9 @@ git clone https://github.com/NVIDIA/cutlass.git csrc/cutlass
 
 
 source /data/zhongz2/anaconda3/bin/activate debug_21
-    module load CUDA/12.1
-    module load cuDNN/8.9.2/CUDA-12
-    module load gcc/11.3.0
+module load CUDA/12.1
+module load cuDNN/8.9.2/CUDA-12
+module load gcc/11.3.0
 
 TORCH_CUDA_ARCH_LIST="7.0 8.0" MAX_JOBS=8 pip install -e .
 export MAX_JOBS=8
