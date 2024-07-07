@@ -161,6 +161,11 @@ if not SKIP_CUDA_BUILD:
                         # "--ptxas-options=-v",
                         # "--ptxas-options=-O2",
                         # "-lineinfo",
+                        # "-DFLASHATTENTION_DISABLE_BACKWARD",
+                        # "-DFLASHATTENTION_DISABLE_DROPOUT",
+                        # "-DFLASHATTENTION_DISABLE_ALIBI",
+                        # "-DFLASHATTENTION_DISABLE_UNEVEN_K",
+                        # "-DFLASHATTENTION_DISABLE_LOCAL",
                     ]
                     + generator_flag
                     + cc_flag
@@ -238,7 +243,7 @@ class CachedWheelsCommand(_bdist_wheel):
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
-        except urllib.error.HTTPError:
+        except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
@@ -300,10 +305,10 @@ setup(
     install_requires=[
         "torch",
         "einops",
-        "packaging",
-        "ninja",
     ],
     setup_requires=[
-        "psutil"
+        "packaging",
+        "psutil",
+        "ninja",
     ],
 )

@@ -233,7 +233,7 @@ def attention_ref(
         window_size: (int, int), left and right window size
         upcast: whether to cast all inputs to fp32, do all computation in fp32, then cast
             output back to fp16/bf16.
-        reorder_ops: whether to change the order of operations (scaling k instead of scaling k, etc.)
+        reorder_ops: whether to change the order of operations (scaling k instead of scaling q, etc.)
             without changing the math. This is to estimate the numerical error from operation
             reordering.
     Output:
@@ -1151,6 +1151,7 @@ def test_flash_attn_varlen_output(
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+
     if kvpacked:
         kv = torch.randn(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
@@ -1918,9 +1919,11 @@ def test_flash_attn_kvcache(
     cache_seqlens = torch.randint(
         0 if new_kv else 1,
         # If we don't use seqlen_q in the case of causal and rotary, cos/sin won't be long enough
-        (seqlen_k - (seqlen_q if (causal or local) and rotary_dim > 1 else seqlen_new) + 1)
-        if new_kv
-        else (seqlen_k + 1),
+        (
+            (seqlen_k - (seqlen_q if (causal or local) and rotary_dim > 1 else seqlen_new) + 1)
+            if new_kv
+            else (seqlen_k + 1)
+        ),
         (batch_size,),
         dtype=torch.int32,
         device=device,
@@ -2456,9 +2459,9 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
 
     g = torch.randn_like(out)
     if (d <= MAX_HEADDIM_SM8x or d > 224) or (is_sm80 or is_sm90):
-        dq, dk, dv = torch.autograd.grad(out, (q_unpad, k_unpad, v_unpad), g, retain_graph=True)
+        dq0, dk0, dv0 = torch.autograd.grad(out, (q_unpad, k_unpad, v_unpad), g, retain_graph=True)
         for _ in range(50):
             dq, dk, dv = torch.autograd.grad(out, (q_unpad, k_unpad, v_unpad), g, retain_graph=True)
-            assert torch.equal(dv, dv)
-            assert torch.equal(dk, dk)
-            assert torch.equal(dq, dq)
+            assert torch.equal(dv, dv0)
+            assert torch.equal(dk, dk0)
+            assert torch.equal(dq, dq0)
